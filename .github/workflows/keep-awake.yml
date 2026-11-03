@@ -1,0 +1,50 @@
+name: Keep survey app awake
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"   # every 6 hours
+  workflow_dispatch:          # adds the "Run workflow" button
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_URL: ${{ vars.SURVEY_APP_URL }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install browser
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Visit the app and wake it if asleep
+        shell: python
+        run: |
+          import os, sys
+          from playwright.sync_api import sync_playwright
+
+          url = os.environ.get("APP_URL", "").strip()
+          if not url:
+              sys.exit("SURVEY_APP_URL variable is not set (Settings > Secrets and variables > Actions > Variables)")
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page()
+              print(f"Opening {url}")
+              page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+              page.wait_for_timeout(10_000)
+
+              button = page.get_by_role("button", name="get this app back up")
+              if button.count() > 0:
+                  print("App was asleep - pressing the wake button")
+                  button.first.click()
+                  page.wait_for_timeout(60_000)
+                  print("Wake button pressed")
+              else:
+                  print("App is already awake")
+
+              browser.close()
