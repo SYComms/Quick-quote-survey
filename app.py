@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from fpdf import FPDF
 
 UK = ZoneInfo("Europe/London")
@@ -698,7 +699,40 @@ CSS = f"""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 :root{{--purple:{PURPLE};--purple2:{PURPLE_2};--teal:{TEAL};--ink:#1f2937;--muted:#6b7280;--line:#e7e4f3;--bg:#f4f3fa}}
 html,body,.stApp,.stApp *:not([data-testid="stIconMaterial"]):not(.material-symbols-rounded),button,input,textarea,select,label{{font-family:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif!important}}
-.stApp{{background:var(--bg)}}
+:root,.stApp{{color-scheme:light}}
+.stApp{{background:var(--bg)!important;color:var(--ink)!important}}
+/* Same light look in dark mode: text, inputs, pills, alerts and code all get explicit colours */
+.stApp .stMarkdown p,.stApp .stMarkdown li,.stApp .stMarkdown strong,.stApp [data-testid="stCaptionContainer"],
+.stApp [data-testid="stText"]{{color:var(--ink)}}
+.stApp [data-testid="stMarkdownContainer"] code{{color:var(--purple);background:#efedf8}}
+[data-testid="stTextInputRootElement"],[data-testid="stTextAreaRootElement"],[data-testid="stNumberInputContainer"],
+[data-baseweb="input"],[data-baseweb="textarea"]{{background:#faf9fe!important;border-color:#e2def0!important}}
+.stApp input,.stApp textarea{{background:transparent!important;color:var(--ink)!important;-webkit-text-fill-color:var(--ink)!important;
+  caret-color:var(--purple)}}
+.stApp input::placeholder,.stApp textarea::placeholder{{color:#9aa0b4!important;-webkit-text-fill-color:#9aa0b4!important}}
+[data-testid="stTextInputRootElement"]:focus-within,[data-testid="stTextAreaRootElement"]:focus-within,
+[data-testid="stNumberInputContainer"]:focus-within{{border-color:var(--teal)!important;box-shadow:0 0 0 3px rgba(0,181,163,.18)!important}}
+input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus{{-webkit-text-fill-color:var(--ink)!important;
+  -webkit-box-shadow:0 0 0 1000px #eefaf8 inset!important}}
+[data-testid="stNumberInput"] button{{background:#f1effa!important;color:var(--purple)!important;border-color:#e2def0!important}}
+[data-testid="stNumberInput"] button:hover{{background:var(--teal)!important;color:#fff!important}}
+[data-testid="stNumberInput"] button svg{{fill:currentColor}}
+[data-testid="stButtonGroup"] button,[data-testid="stPills"] button{{background:#fff!important;color:#374151!important;
+  border:1px solid #dcd8ec!important;transition:all .15s}}
+[data-testid="stButtonGroup"] button p,[data-testid="stPills"] button p{{color:inherit!important}}
+[data-testid="stButtonGroup"] button:hover,[data-testid="stPills"] button:hover{{background:#eefaf8!important;
+  border-color:var(--teal)!important;color:var(--purple)!important}}
+[data-testid="stButtonGroup"] button[kind*="Active"],[data-testid="stPills"] button[kind*="Active"],
+[data-testid*="pillsActive"],[data-testid="stButtonGroup"] button[aria-checked="true"],
+[data-testid="stButtonGroup"] button[aria-pressed="true"]{{background:var(--teal)!important;border-color:var(--teal)!important;
+  color:#fff!important;font-weight:600!important}}
+[data-testid="stButtonGroup"] button[kind*="Active"]:hover,[data-testid*="pillsActive"]:hover{{filter:brightness(1.05)}}
+[data-testid="stAlert"]{{background:#fff4f2!important;border:1px solid #f6c9c0!important;border-radius:12px!important}}
+[data-testid="stAlert"] *{{color:#7a2617!important}}
+.stApp button[kind="secondary"]:not([data-testid*="pills"]){{background:#fff!important;color:var(--purple)!important;
+  border:1px solid #dcd8ec!important}}
+.stApp [data-testid="stCode"] pre,.stApp pre{{background:#f6f5fb!important}}
+.stApp [data-testid="stCode"] code,.stApp pre code{{color:var(--purple)!important}}
 header[data-testid="stHeader"],[data-testid="stToolbar"],[data-testid="stDecoration"],#MainMenu,footer,
 [data-testid="stStatusWidget"],[data-testid="collapsedControl"],[data-testid="stSidebarCollapsedControl"]{{display:none!important}}
 .block-container{{max-width:760px!important;padding:0 1rem 3rem 1rem!important}}
@@ -730,7 +764,7 @@ div[class*="st-key-card-"]{{background:#fff;border:1px solid var(--line);border-
 .qs-h .t{{font-weight:800;color:var(--purple);font-size:1.08rem}}.qs-h .s{{font-size:.82rem;color:var(--muted)}}
 /* Inputs */
 .stTextInput input,.stNumberInput input,.stTextArea textarea{{border-radius:10px!important}}
-[data-baseweb="input"],[data-baseweb="textarea"],[data-baseweb="select"]>div{{background:#faf9fe!important;border-color:#e2def0!important;border-radius:10px!important}}
+[data-testid="stTextInputRootElement"],[data-testid="stTextAreaRootElement"],[data-testid="stNumberInputContainer"]{{border-radius:10px!important}}
 label p{{font-weight:600!important;color:#374151!important;font-size:.88rem!important}}
 [data-testid="stPills"] button,[data-testid="stButtonGroup"] button{{border-radius:999px!important}}
 /* Submit */
@@ -739,6 +773,7 @@ label p{{font-weight:600!important;color:#374151!important;font-size:.88rem!impo
   box-shadow:0 10px 24px -10px rgba(0,181,163,.7)}}
 .st-key-submit button p,.st-key-dl button p{{font-weight:800!important;font-size:1.02rem!important;color:#fff!important}}
 .st-key-submit button:hover,.st-key-dl button:hover{{filter:brightness(1.05)}}
+[data-testid="stElementContainer"]:has(iframe[height="0"]),.element-container:has(iframe[height="0"]){{display:none!important}}
 .st-key-hp{{position:absolute!important;left:-9999px!important;height:0!important;overflow:hidden!important}}
 .qs-fine{{font-size:.76rem;color:var(--muted);text-align:center;margin-top:10px;line-height:1.5}}
 .qs-foot{{text-align:center;font-size:.76rem;color:#9aa0b4;margin-top:26px;line-height:1.6}}
@@ -837,7 +872,40 @@ def read_link() -> Dict[str, str]:
     return link
 
 
+AUTOFILL_JS = """
+<script>
+(function () {
+  const doc = window.parent.document, win = window.parent;
+  if (win.__qsAutofill) return;
+  win.__qsAutofill = true;
+  const setVal = (el) => {
+    const proto = el.tagName === "TEXTAREA" ? win.HTMLTextAreaElement.prototype : win.HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, el.value);
+    el.dispatchEvent(new win.Event("input", { bubbles: true }));
+    el.dispatchEvent(new win.FocusEvent("focusout", { bubbles: true }));
+    el.dispatchEvent(new win.FocusEvent("blur"));
+  };
+  const sync = (all) => {
+    doc.querySelectorAll('.stApp input[type="text"], .stApp input:not([type]), .stApp textarea').forEach((el) => {
+      if (el.value !== (el.__qsSeen ?? el.defaultValue)) {
+        if (all || el !== doc.activeElement) setVal(el);
+      }
+      el.__qsSeen = el.value;
+    });
+  };
+  // Autofill changes boxes you're not typing in: pick those up every half second
+  win.setInterval(() => sync(false), 500);
+  // And make sure everything is in before Send is pressed
+  doc.addEventListener("pointerdown", (e) => {
+    if (e.target.closest && e.target.closest(".st-key-submit")) sync(true);
+  }, true);
+})();
+</script>
+"""
+
+
 def form_page() -> None:
+    components.html(AUTOFILL_JS, height=0)
     link = read_link()
     if "qs_started" not in st.session_state:  # Prefill once from the link
         st.session_state["qs_started"] = time.time()
@@ -865,17 +933,17 @@ def form_page() -> None:
 
     with section("1", 1, "About you", "So we know who the quote is for", done1):
         c1, c2 = st.columns(2)  # Two rows, so phones show them in reading order
-        c1.text_input("Company name", key="f_company", placeholder="e.g. Acme Dental Ltd")
-        c2.text_input("Your name", key="f_name", placeholder="First and last name")
+        c1.text_input("Company name", key="f_company", autocomplete="organization", placeholder="e.g. Acme Dental Ltd")
+        c2.text_input("Your name", key="f_name", autocomplete="name", placeholder="First and last name")
         c3, c4 = st.columns(2)
-        c3.text_input("Email address", key="f_email", placeholder="you@company.co.uk")
-        c4.text_input("Phone number", key="f_phone", placeholder="Best number to reach you")
+        c3.text_input("Email address", key="f_email", autocomplete="email", placeholder="you@company.co.uk")
+        c4.text_input("Phone number", key="f_phone", autocomplete="tel", placeholder="Best number to reach you")
 
     with section("2", 2, "Your sites", "Where the phones will be used", done2):
-        st.text_input("Main business address", key="f_street", placeholder="Building and street")
+        st.text_input("Main business address", key="f_street", autocomplete="street-address", placeholder="Building and street")
         c1, c2 = st.columns(2)
-        c1.text_input("Town or city", key="f_town")
-        c2.text_input("Postcode", key="f_postcode")
+        c1.text_input("Town or city", key="f_town", autocomplete="address-level2")
+        c2.text_input("Postcode", key="f_postcode", autocomplete="postal-code")
         st.number_input("How many sites do you have?", min_value=1, max_value=200, step=1, key="f_sites", value=1)
         if (g("sites") or 1) > 1:
             st.text_area("Other site addresses", key="f_other_sites", height=90,
@@ -902,7 +970,7 @@ def form_page() -> None:
                      placeholder="Call queues, opening hours, software you use, contract end dates…")
 
     with st.container(key="hp"):  # Hidden from people; bots fill it in
-        st.text_input("Leave this empty", key="f_website")
+        st.text_input("Leave this empty", key="f_website", autocomplete="off")
 
     if ss.get("qs_errors"):
         st.error("Nearly there. Please check:\n\n" + "\n".join(f"- {e}" for e in ss["qs_errors"]))
