@@ -745,6 +745,29 @@ html,body,.stApp,.stApp *:not([data-testid="stIconMaterial"]):not(.material-symb
 .stApp input,.stApp textarea{{background:transparent!important;color:var(--ink)!important;-webkit-text-fill-color:var(--ink)!important;
   caret-color:var(--purple)}}
 .stApp input::placeholder,.stApp textarea::placeholder{{color:#9aa0b4!important;-webkit-text-fill-color:#9aa0b4!important}}
+/* Drop-downs and time pickers (and their pop-up lists), light in dark mode too */
+[data-testid="stSelectbox"] [data-baseweb="select"]>div,[data-testid="stTimeInput"] [data-baseweb="select"]>div,
+[data-baseweb="select"]>div,[data-testid="stSelectbox"] [role="group"],[data-testid="stTimeInput"] [role="group"],
+.stApp div[role="group"]:has(> input[role="combobox"]){{background:#faf9fe!important;border:1px solid #e2def0!important;
+  border-radius:10px!important}}
+.stApp div[role="group"]:has(> input[role="combobox"]):focus-within{{border-color:var(--teal)!important;
+  box-shadow:0 0 0 3px rgba(0,181,163,.18)!important}}
+[data-testid="stTimeInput"] input,[data-testid="stTimeInput"] div{{border-color:#e2def0!important}}
+[data-testid="stTimeInput"] input{{background:#faf9fe!important;border-radius:10px!important}}
+.stApp div[role="group"]:has(> input[role="combobox"]) svg{{fill:var(--purple)!important;color:var(--purple)!important}}
+[data-baseweb="select"] *,[data-testid="stSelectbox"] *,[data-testid="stTimeInput"] *{{color:var(--ink)!important;
+  -webkit-text-fill-color:var(--ink)!important}}
+[data-baseweb="select"] svg{{fill:var(--purple)!important;color:var(--purple)!important}}
+[data-baseweb="select"]:focus-within>div{{border-color:var(--teal)!important;box-shadow:0 0 0 3px rgba(0,181,163,.18)!important}}
+[data-baseweb="popover"],[data-baseweb="popover"]>div,[data-baseweb="menu"],[data-baseweb="popover"] ul,
+[role="listbox"]{{background:#ffffff!important;border-color:#e2def0!important}}
+[data-baseweb="popover"] li,[role="option"],[data-baseweb="popover"] li *,[role="option"] *{{background:#ffffff!important;
+  color:var(--ink)!important;-webkit-text-fill-color:var(--ink)!important}}
+[data-baseweb="popover"] li:hover,[data-baseweb="popover"] li:hover *,[role="option"]:hover,[role="option"]:hover *,
+[role="option"][aria-selected="true"],[role="option"][aria-selected="true"] *{{background:#eefaf8!important;
+  color:var(--purple)!important;-webkit-text-fill-color:var(--purple)!important}}
+[data-baseweb="popover"] [data-baseweb="menu"],[data-baseweb="popover"] ul{{box-shadow:0 12px 32px -12px rgba(31,20,80,.25)!important;
+  border:1px solid #e2def0!important;border-radius:10px!important}}
 [data-testid="stTextInputRootElement"]:focus-within,[data-testid="stTextAreaRootElement"]:focus-within,
 [data-testid="stNumberInputContainer"]:focus-within{{border-color:var(--teal)!important;box-shadow:0 0 0 3px rgba(0,181,163,.18)!important}}
 input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus{{-webkit-text-fill-color:var(--ink)!important;
