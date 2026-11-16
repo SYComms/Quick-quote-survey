@@ -20,7 +20,7 @@ import re
 import tempfile
 import time
 import unicodedata
-from datetime import datetime
+from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -62,8 +62,10 @@ SURVEY_TAG_DONE = secret("SURVEY_DONE_TAG", "Survey completed")
 SURVEY_SOURCE = secret("SURVEY_LEAD_SOURCE", "Survey form")
 BOOKING_URL = secret("DEMO_BOOKING_URL")
 SIGNING_KEY = secret("SURVEY_SIGNING_KEY")
-ZOHO_SCOPE = ("ZohoCRM.modules.leads.ALL,ZohoCRM.modules.notes.CREATE,ZohoCRM.coql.READ,ZohoCRM.settings.fields.READ,"
+ZOHO_SCOPE = ("ZohoCRM.modules.leads.ALL,ZohoCRM.modules.contacts.READ,ZohoCRM.send_mail.contacts.CREATE,ZohoCRM.modules.notes.CREATE,ZohoCRM.coql.READ,ZohoCRM.settings.fields.READ,"
               "ZohoCRM.send_mail.leads.CREATE,ZohoCRM.Files.CREATE,ZohoCRM.settings.emails.READ")
+DEFAULT_BRAND = {"name": COMPANY, "primary": PURPLE, "accent": TEAL,
+                 "tagline": "Business phones that work with your software", **CONTACT}
 APP_NAMES = {"pe": "Prospect Engine", "lr": "Lead Revival", "mp": "MY PA", "cg": "Customer Growth"}
 
 CALL_OPTIONS = ["Desk phones", "Softphone on a computer", "Mobile app", "Not sure yet"]
@@ -224,7 +226,7 @@ class Zoho:
                                      files={"file": (filename, data, "application/pdf")}))["id"]
 
     def send_mail(self, lead_id: str, sender: Dict[str, Any], to_email: str, to_name: str, subject: str, html: str,
-                  attachment_ids: Optional[List[str]] = None) -> None:
+                  attachment_ids: Optional[List[str]] = None, module: str = "Leads") -> None:
         mail: Dict[str, Any] = {"from": {"user_name": sender.get("user_name") or COMPANY, "email": sender["email"]},
                                 "to": [{"user_name": to_name or "", "email": to_email}],
                                 "subject": subject, "content": html, "mail_format": "html"}
@@ -232,11 +234,27 @@ class Zoho:
             mail["org_email"] = True
         if attachment_ids:
             mail["attachments"] = [{"id": a} for a in attachment_ids]
-        self.row(self.request("POST", f"/crm/v8/Leads/{lead_id}/actions/send_mail", json={"data": [mail]}))
+        self.row(self.request("POST", f"/crm/v8/{module}/{lead_id}/actions/send_mail", json={"data": [mail]}))
 
-    def record_url(self, lead_id: str) -> str:
+    def contact(self, contact_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            body = self.request("GET", f"/crm/v8/Contacts/{contact_id}", params={"fields": "First_Name,Last_Name,Email"})
+        except ZohoError:
+            return None
+        return ((body or {}).get("data") or [None])[0]
+
+    def find_contact_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        if not email:
+            return None
+        try:
+            body = self.request("GET", "/crm/v8/Contacts/search", params={"email": email})
+        except ZohoError:
+            return None
+        return ((body or {}).get("data") or [None])[0]
+
+    def record_url(self, lead_id: str, module: str = "Leads") -> str:
         org = secret("ZOHO_ORG").strip("/")
-        return f"{self.crm_url}/crm/{org}/tab/Leads/{lead_id}" if org else f"{self.crm_url}/crm/tab/Leads/{lead_id}"
+        return f"{self.crm_url}/crm/{org}/tab/{module}/{lead_id}" if org else f"{self.crm_url}/crm/tab/{module}/{lead_id}"
 
 
 ZOHO = Zoho()
@@ -250,10 +268,18 @@ def lead_fields() -> Dict[str, Dict[str, Any]]:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def sender_address() -> Optional[Dict[str, Any]]:
-    addrs = ZOHO.from_addresses()
-    pick = next((a for a in addrs if (a.get("email") or "").lower() == SURVEY_FROM), None)
-    return pick or (addrs[0] if addrs else None)
+def all_senders() -> List[Dict[str, Any]]:
+    return ZOHO.from_addresses()
+
+
+def sender_address(prefer: str = "") -> Optional[Dict[str, Any]]:
+    """The verified From address to use: `prefer` (e.g. the customer's brand address) if Zoho has it, else SURVEY_FROM."""
+    addrs = all_senders()
+    for want in (prefer.strip().lower(), SURVEY_FROM):
+        pick = next((a for a in addrs if want and (a.get("email") or "").lower() == want), None)
+        if pick:
+            return pick
+    return addrs[0] if addrs else None
 
 
 # Survey answer → the Lead field that holds it. Matched on the field's label or API name, any spelling/case,
@@ -337,13 +363,17 @@ def survey_field_values(ans: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]
 # =====================================================================
 # Shared data repo (GitHub): every response, for Prospect Engine / Lead Revival / Lead Overview stats
 # =====================================================================
-def gh_settings() -> Tuple[str, str, str, str]:
+def gh_settings(kind: str = "survey") -> Tuple[str, str, str, str]:
+    """kind 'survey' = quote survey responses; 'xmas' = Christmas opening hours replies."""
+    if kind == "xmas":
+        return (secret("XMAS_GITHUB_TOKEN") or secret("GITHUB_TOKEN"), secret("XMAS_GITHUB_REPO") or secret("GITHUB_REPO"),
+                secret("GITHUB_BRANCH", "main"), secret("GITHUB_XMAS_PATH", "xmas_responses.json"))
     return (secret("GITHUB_TOKEN"), secret("GITHUB_REPO"), secret("GITHUB_BRANCH", "main"),
             secret("GITHUB_SURVEY_PATH", "survey_responses.json"))
 
 
-def gh_read() -> Tuple[Dict[str, Any], Optional[str]]:
-    token, repo, branch, path = gh_settings()
+def gh_read(kind: str = "survey") -> Tuple[Dict[str, Any], Optional[str]]:
+    token, repo, branch, path = gh_settings(kind)
     if not (token and repo):
         return {}, None
     r = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", params={"ref": branch}, timeout=15,
@@ -356,15 +386,15 @@ def gh_read() -> Tuple[Dict[str, Any], Optional[str]]:
     return (json.loads(text) if text else {}), body.get("sha")
 
 
-def gh_save(key: str, record: Dict[str, Any]) -> Optional[str]:
+def gh_save(key: str, record: Dict[str, Any], kind: str = "survey") -> Optional[str]:
     """Adds one response. Re-reads before writing, retries if someone saved at the same moment. Returns an error."""
-    token, repo, branch, path = gh_settings()
+    token, repo, branch, path = gh_settings(kind)
     if not (token and repo):
         return "GITHUB_TOKEN / GITHUB_REPO not set"
     last = "GitHub kept rejecting the save"
     for _ in range(4):
         try:
-            data, sha = gh_read()
+            data, sha = gh_read(kind)
             data[key] = record
             payload = {"message": f"Survey: {record.get('company') or 'response'}", "branch": branch,
                        "content": base64.b64encode(json.dumps(data, indent=1, ensure_ascii=False).encode()).decode()}
@@ -451,7 +481,10 @@ def _hex(c: str) -> Tuple[int, int, int]:
     return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
 
 
-def build_pdf(a: Dict[str, Any], when: datetime) -> bytes:
+def build_pdf(a: Dict[str, Any], when: datetime, sections: Optional[List[Tuple[str, List[Tuple[str, str]]]]] = None,
+              title: str = "Phone system quote: your answers", brand: Optional[Dict[str, Any]] = None) -> bytes:
+    b = brand or DEFAULT_BRAND
+    BP, BA = b.get("primary") or PURPLE, b.get("accent") or TEAL
     pdf = FPDF(format="A4")
     pdf.set_auto_page_break(True, margin=20)
     fam = "Helvetica"
@@ -468,36 +501,36 @@ def build_pdf(a: Dict[str, Any], when: datetime) -> bytes:
     pdf.add_page()
     W = pdf.w
     # Header band
-    pdf.set_fill_color(*_hex(PURPLE))
+    pdf.set_fill_color(*_hex(BP))
     pdf.rect(0, 0, W, 46, "F")
-    pdf.set_fill_color(*_hex(TEAL))
+    pdf.set_fill_color(*_hex(BA))
     pdf.rect(0, 46, W, 1.6, "F")
     pdf.set_xy(16, 13)
     pdf.set_font(fam, heavy, 17)
     pdf.set_text_color(255, 255, 255)
-    first, _, rest = COMPANY.partition(" ")
+    first, rest = (b["word1"], b.get("word2", "")) if b.get("word1") else tuple(b["name"].partition(" ")[::2])
     pdf.cell(pdf.get_string_width(T(first + " ")), 8, T(first + " "))
-    pdf.set_text_color(*_hex(TEAL))
+    pdf.set_text_color(*_hex(BA))
     pdf.cell(0, 8, T(rest))
     pdf.set_xy(16, 23)
     pdf.set_font(fam, "B", 11.5)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(0, 6, T("Phone system quote: your answers"))
+    pdf.cell(0, 6, T(title))
     pdf.set_xy(16, 30)
     pdf.set_font(fam, "", 9.5)
     pdf.set_text_color(201, 195, 236)
     pdf.cell(0, 5, T(f"{a.get('company', '')}  ·  Submitted {when.strftime('%d %B %Y, %H:%M')}"))
     y = 56
-    for title, rows in answer_rows(a):
+    for sec_title, rows in (sections or answer_rows(a)):
         need = 12 + 7 * len(rows)
         if y + need > pdf.h - 24:
             pdf.add_page()
             y = 18
         pdf.set_xy(16, y)
         pdf.set_font(fam, heavy, 10.5)
-        pdf.set_text_color(*_hex(PURPLE))
-        pdf.cell(0, 6, T(title.upper()))
-        pdf.set_fill_color(*_hex(TEAL))
+        pdf.set_text_color(*_hex(BP))
+        pdf.cell(0, 6, T(sec_title.upper()))
+        pdf.set_fill_color(*_hex(BA))
         pdf.rect(16, y + 6.6, 14, 0.8, "F")
         y += 10
         for k, v in rows:
@@ -518,7 +551,7 @@ def build_pdf(a: Dict[str, Any], when: datetime) -> bytes:
     pdf.set_xy(16, pdf.h - 18)
     pdf.set_font(fam, "", 8.5)
     pdf.set_text_color(138, 143, 163)
-    pdf.cell(0, 5, T(f"{COMPANY}  ·  {CONTACT['phone']}  ·  {CONTACT['email']}  ·  {CONTACT['website']}"))
+    pdf.cell(0, 5, T("  ·  ".join(x for x in (b.get("name"), b.get("phone"), b.get("email"), b.get("website")) if x)))
     return bytes(pdf.output())
 
 
@@ -526,8 +559,10 @@ def build_pdf(a: Dict[str, Any], when: datetime) -> bytes:
 FONT_CSS = "font-family:'Segoe UI',Calibri,Arial,Helvetica,sans-serif"
 
 
-def _email_shell(inner: str) -> str:
-    first, _, rest = COMPANY.partition(" ")
+def _email_shell(inner: str, brand: Optional[Dict[str, Any]] = None) -> str:
+    b = brand or DEFAULT_BRAND
+    PURPLE, TEAL = b.get("primary") or globals()["PURPLE"], b.get("accent") or globals()["TEAL"]
+    first, rest = (b["word1"], b.get("word2", "")) if b.get("word1") else tuple(b["name"].partition(" ")[::2])
     return (
         '<html><body style="margin:0;padding:0;background:#f1f0f7">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f0f7"><tr>'
@@ -538,11 +573,11 @@ def _email_shell(inner: str) -> str:
         f'<tr><td bgcolor="{PURPLE}" style="background:{PURPLE};padding:22px 36px;border-radius:12px 12px 0 0">'
         f'<div style="{FONT_CSS};font-size:20px;font-weight:800;color:#ffffff">{esc(first)} '
         f'<span style="color:{TEAL}">{esc(rest)}</span></div>'
-        f'<div style="{FONT_CSS};font-size:12px;color:#c9c3ec;margin-top:3px">Business phones that work with your software</div>'
+        f'<div style="{FONT_CSS};font-size:12px;color:#c9c3ec;margin-top:3px">{esc(b.get("tagline") or "")}</div>'
         f'</td></tr><tr><td height="4" bgcolor="{TEAL}" style="background:{TEAL};font-size:0;line-height:0">&nbsp;</td></tr>'
         f"{inner}</table></td></tr>"
         f'<tr><td style="padding:10px 36px 0 36px;{FONT_CSS};font-size:11px;color:#a3a7b8">'
-        f'{esc(COMPANY)} · {esc(CONTACT["address"])}</td></tr></table></td></tr></table></body></html>')
+        f'{esc(b.get("name"))}{" · " + esc(b.get("address")) if b.get("address") else ""}</td></tr></table></td></tr></table></body></html>')
 
 
 def _p(text: str, extra: str = "") -> str:
@@ -822,18 +857,24 @@ def html(markup: str) -> None:
     st.markdown(markup, unsafe_allow_html=True)
 
 
-def brand_html() -> str:
-    first, _, rest = COMPANY.partition(" ")
+def brand_html(brand: Optional[Dict[str, Any]] = None) -> str:
+    b = brand or DEFAULT_BRAND
+    first, rest = (b["word1"], b.get("word2", "")) if b.get("word1") else tuple(b["name"].partition(" ")[::2])
     return (f'<div class="qs-brand">{esc(first)} <span>{esc(rest)}</span></div>'
-            '<div class="qs-tag">Business phones that work with your software</div>')
+            f'<div class="qs-tag">{esc(b.get("tagline") or "")}</div>')
 
 
-def footer() -> None:
-    html(f'<div class="qs-foot">{esc(COMPANY)} · {esc(CONTACT["address"])}<br>'
-         f'<a href="tel:{esc(CONTACT["phone"].replace(" ", ""))}">{esc(CONTACT["phone"])}</a> · '
-         f'<a href="mailto:{esc(CONTACT["email"])}">{esc(CONTACT["email"])}</a> · '
-         f'<a href="https://{esc(CONTACT["website"])}" target="_blank">{esc(CONTACT["website"])}</a><br>'
-         "We only use your answers to prepare your quote.</div>")
+def footer(brand: Optional[Dict[str, Any]] = None, note: str = "We only use your answers to prepare your quote.") -> None:
+    b = brand or DEFAULT_BRAND
+    links = []
+    if b.get("phone"):
+        links.append(f'<a href="tel:{esc(b["phone"].replace(" ", ""))}">{esc(b["phone"])}</a>')
+    if b.get("email"):
+        links.append(f'<a href="mailto:{esc(b["email"])}">{esc(b["email"])}</a>')
+    if b.get("website"):
+        links.append(f'<a href="https://{esc(b["website"])}" target="_blank">{esc(b["website"])}</a>')
+    html(f'<div class="qs-foot">{esc(b.get("name"))}{" · " + esc(b["address"]) if b.get("address") else ""}<br>'
+         + " · ".join(links) + f"<br>{esc(note)}</div>")
 
 
 def section(key: str, num: int, title: str, sub: str, done: bool):
@@ -1107,6 +1148,19 @@ def admin_page() -> None:
             checks.append(("Stats repo", bool(gh_settings()[0] and gh_settings()[1]), f"{len(data)} responses saved"))
         except Exception as exc:
             checks.append(("Stats repo", False, f"Can't read it ({exc.__class__.__name__})"))
+        if ZOHO.configured:
+            try:
+                ZOHO.request("GET", "/crm/v8/Contacts", params={"fields": "Email", "per_page": 1})
+                checks.append(("Christmas form (Contacts)", True, "Can email customers' contacts"))
+            except ZohoError:
+                checks.append(("Christmas form (Contacts)", False,
+                               "The Zoho key needs the new scope: make a fresh one with the key helper below"))
+        try:
+            xd, _ = gh_read("xmas")
+            checks.append(("Christmas tracker", bool(gh_settings("xmas")[0] and gh_settings("xmas")[1]),
+                           f"{len(xd)} replies saved"))
+        except Exception as exc:
+            checks.append(("Christmas tracker", False, f"Can't read it ({exc.__class__.__name__})"))
         checks.append(("Signed links", bool(SIGNING_KEY), "Set" if SIGNING_KEY else "Add SURVEY_SIGNING_KEY (same in all apps)"))
         checks.append(("Alerts to", bool(SURVEY_ALERT_TO), SURVEY_ALERT_TO or "Off (add SURVEY_ALERT_TO)"))
         for name, ok, detail in checks:
@@ -1137,13 +1191,512 @@ def admin_page() -> None:
         base = secret("APP_URL", "https://your-survey-app.streamlit.app")
         if lid or comp:
             st.code(signed_link(base, lid, comp, name, mail, src="pe"), language=None)
+        st.markdown("**Christmas hours test link** (the one Customer Growth sends)")
+        x1, x2 = st.columns(2)
+        aid = x1.text_input("Zoho account ID", key="adm_aid")
+        cid = x2.text_input("Zoho contact ID", key="adm_cid")
+        if aid and mail:
+            q = {"form": "xmas", "aid": aid, "cid": cid, "c": comp, "n": name, "e": mail, "b": COMPANY}
+            q = {k: v for k, v in q.items() if v}
+            q["s"] = sign_xmas(aid, cid, mail, COMPANY)
+            st.code(base + ("&" if "?" in base else "?") + urlencode(q), language=None)
+        else:
+            st.caption("Fill in the email above plus an account ID (and contact ID) to make one.")
     footer()
+
+
+# =====================================================================
+# Christmas opening hours form (?form=xmas): sent to existing customers from Customer Growth
+# =====================================================================
+XMAS_MODES = ["As normal", "Closed all day", "Closing early", "Opening late", "Custom hours"]
+XMAS_OOH = ["Closed message, then voicemail", "Closed message only", "Straight to voicemail",
+            "Divert to another number"]
+XMAS_MSG = ["Use the standard festive message", "Use my own words"]
+XMAS_REC = ["Please create it for us", "We'll record our own"]
+XMAS_PRESETS = {
+    "Bank holidays only": "bank",
+    "Closed Christmas Day to New Year's Day": "25-1",
+    "Closed Christmas Eve to 2 January": "24-2",
+    "I'll set each day": "custom",
+}
+HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def sign_xmas(aid: str, cid: str, email: str, brand_name: str) -> str:
+    """Same recipe as Customer Growth uses when it builds the Christmas link."""
+    msg = f"xmas|{aid}|{cid}|{(email or '').strip().lower()}|{brand_name}".encode()
+    return hmac.new(SIGNING_KEY.encode(), msg, hashlib.sha256).hexdigest()[:20]
+
+
+def xmas_season() -> List[date]:
+    """The days the form asks about: XMAS_FROM / XMAS_TO in Secrets, else 23 December to 4 January."""
+    try:
+        start = date.fromisoformat(secret("XMAS_FROM"))
+        end = date.fromisoformat(secret("XMAS_TO"))
+    except ValueError:
+        today = now_uk().date()
+        y = today.year if today.month >= 6 else today.year - 1
+        start, end = date(y, 12, 23), date(y + 1, 1, 4)
+    n = max(0, min((end - start).days, 40))
+    return [start + timedelta(days=i) for i in range(n + 1)]
+
+
+def uk_bank_holidays(days: List[date]) -> Dict[date, str]:
+    """England & Wales bank holidays in the range, with weekend substitutes."""
+    out: Dict[date, str] = {}
+    for y in sorted({d.year for d in days} | {days[0].year - 1} if days else set()):
+        xmas, boxing = date(y, 12, 25), date(y, 12, 26)
+        if xmas.weekday() == 5:      # Sat 25: Mon 27 + Tue 28
+            out[date(y, 12, 27)], out[date(y, 12, 28)] = "Christmas Day (substitute)", "Boxing Day (substitute)"
+        elif xmas.weekday() == 6:    # Sun 25: Mon 26 Boxing Day, Tue 27 substitute
+            out[boxing], out[date(y, 12, 27)] = "Boxing Day", "Christmas Day (substitute)"
+        else:
+            out[xmas] = "Christmas Day"
+            if boxing.weekday() == 5:
+                out[date(y, 12, 28)] = "Boxing Day (substitute)"
+            else:
+                out[boxing] = "Boxing Day"
+        ny = date(y + 1, 1, 1)
+        out[ny if ny.weekday() < 5 else ny + timedelta(days=7 - ny.weekday())] = \
+            "New Year's Day" if ny.weekday() < 5 else "New Year's Day (substitute)"
+    return out
+
+
+def day_note(d: date, bh: Dict[date, str]) -> str:
+    if d in bh:
+        return "Bank holiday · " + bh[d]
+    named = {(12, 24): "Christmas Eve", (12, 25): "Christmas Day", (12, 26): "Boxing Day", (12, 31): "New Year's Eve",
+             (1, 1): "New Year's Day"}.get((d.month, d.day), "")
+    if d.weekday() >= 5:
+        return (named + " · " if named else "") + "Weekend"
+    return named
+
+
+def read_xmas_link() -> Tuple[Dict[str, str], Dict[str, Any]]:
+    """(link details, brand). Tied to the customer and shown in their brand only when the signature checks out."""
+    qp = st.query_params
+    link = {k: str(qp.get(k) or "").strip()[:200] for k in
+            ("aid", "cid", "c", "n", "e", "p", "b", "w1", "w2", "pc", "ac", "bp", "be", "bw", "s")}
+    ok = bool(SIGNING_KEY and link["aid"] and link["s"]
+              and hmac.compare_digest(link["s"], sign_xmas(link["aid"], link["cid"], link["e"], link["b"])))
+    brand = dict(DEFAULT_BRAND)
+    if ok:
+        brand.update({k: v for k, v in (("name", link["b"]), ("word1", link["w1"]), ("word2", link["w2"]),
+                                        ("phone", link["bp"]), ("email", link["be"]), ("website", link["bw"])) if v})
+        if HEX_RE.match(link["pc"]):
+            brand["primary"] = link["pc"]
+        if HEX_RE.match(link["ac"]):
+            brand["accent"] = link["ac"]
+        if link["b"] and link["b"] != COMPANY:
+            brand["address"] = ""  # Our address belongs to SY Communications only
+    else:
+        link["aid"] = link["cid"] = ""
+    return link, brand
+
+
+def _shade(hex_: str, amount: float) -> str:
+    r, g, b_ = _hex(hex_)
+    f = (lambda c: int(c + (255 - c) * amount)) if amount > 0 else (lambda c: int(c * (1 + amount)))
+    return "#{:02x}{:02x}{:02x}".format(f(r), f(g), f(b_))
+
+
+def brand_css(brand: Dict[str, Any]) -> None:
+    p_, a_ = brand.get("primary") or PURPLE, brand.get("accent") or TEAL
+    html(f"<style>:root{{--purple:{p_};--purple2:{_shade(p_, 0.14)};--teal:{a_}}}"
+         f".st-key-submit button,.st-key-dl button{{background:linear-gradient(135deg,{a_},{_shade(a_, -0.12)})!important;"
+         f"box-shadow:0 10px 24px -12px {a_}!important}}"
+         ".qs-hero.xmas:before{content:'❄  ✦  ❄  ✦  ❄';position:absolute;right:28px;top:22px;color:rgba(255,255,255,.28);"
+         "font-size:1.05rem;letter-spacing:4px}</style>")
+
+
+def apply_preset() -> None:
+    mode = XMAS_PRESETS.get(st.session_state.get("x_preset") or "", "custom")
+    if mode == "custom":
+        return
+    days = xmas_season()
+    bh = uk_bank_holidays(days)
+    for d in days:
+        if mode == "bank":
+            val = "Closed all day" if d in bh else "As normal"
+        else:
+            y = d.year if d.month == 12 else d.year - 1
+            first = date(y, 12, 25) if mode == "25-1" else date(y, 12, 24)
+            last = date(y + 1, 1, 1) if mode == "25-1" else date(y + 1, 1, 2)
+            val = "Closed all day" if first <= d <= last else "As normal"
+        st.session_state[f"x_mode_{d.isoformat()}"] = val
+
+
+def fmt_t(t: Optional[dt_time]) -> str:
+    return t.strftime("%H:%M") if t else "?"
+
+
+def day_text(mode: str, o: Optional[dt_time], c: Optional[dt_time]) -> str:
+    return {"Closed all day": "Closed all day", "Closing early": f"Closing early at {fmt_t(c)}",
+            "Opening late": f"Opening late at {fmt_t(o)}",
+            "Custom hours": f"Open {fmt_t(o)} to {fmt_t(c)}"}.get(mode, "As normal")
+
+
+def xmas_message(company: str, ooh: str, reopen: Optional[date]) -> str:
+    when = f" and will reopen on {reopen.strftime('%A %d %B').replace(' 0', ' ')}" if reopen else ""
+    action = ("Please leave your name, number and a short message after the tone, and we'll call you back."
+              if "voicemail" in ooh.lower() else "Please call back when we reopen.")
+    return (f"Thank you for calling {company or 'us'}. We're closed for the Christmas holidays{when}. "
+            f"{action} Merry Christmas and a happy New Year.")
+
+
+def reopen_day(plan: List[Dict[str, Any]]) -> Optional[date]:
+    """First weekday after the last fully closed day."""
+    closed = [p["date"] for p in plan if p["mode"] == "Closed all day"]
+    if not closed:
+        return None
+    d = max(closed) + timedelta(days=1)
+    by = {p["date"]: p["mode"] for p in plan}
+    while d.weekday() >= 5 or by.get(d) == "Closed all day":
+        d += timedelta(days=1)
+    return d
+
+
+def xmas_collect(days: List[date]) -> Tuple[Dict[str, Any], List[str]]:
+    ss = st.session_state
+    t = lambda k: str(ss.get(f"x_{k}") or "").strip()  # noqa: E731
+    plan = []
+    for d in days:
+        iso = d.isoformat()
+        mode = ss.get(f"x_mode_{iso}") or "As normal"
+        o, c = ss.get(f"x_open_{iso}"), ss.get(f"x_close_{iso}")
+        plan.append({"date": d, "mode": mode, "open": o if mode in ("Opening late", "Custom hours") else None,
+                     "close": c if mode in ("Closing early", "Custom hours") else None})
+    changed = [p for p in plan if p["mode"] != "As normal"]
+    a = {k: t(k) for k in ("company", "name", "email", "phone", "vm_email", "divert", "own_msg", "notes")}
+    a["ooh"] = ss.get("x_ooh") or ""
+    a["msg_type"] = ss.get("x_msg") or XMAS_MSG[0]
+    a["recording"] = ss.get("x_rec") or XMAS_REC[0]
+    a["reopen"] = reopen_day(plan)
+    a["plan"] = plan
+    a["changed"] = changed
+    a["message"] = (a["own_msg"] if a["msg_type"] == XMAS_MSG[1]
+                    else xmas_message(a["company"], a["ooh"], a["reopen"])) if changed else ""
+    errs = []
+    for k, label in (("company", "Company name"), ("name", "Your name"), ("email", "Email address")):
+        if not a[k]:
+            errs.append(f"{label} is missing")
+    if a["email"] and not EMAIL_RE.match(a["email"]):
+        errs.append("The email address doesn't look right")
+    if changed:
+        if not a["ooh"]:
+            errs.append("What callers should hear while you're closed")
+        if "voicemail" in a["ooh"].lower() and not EMAIL_RE.match(a["vm_email"] or ""):
+            errs.append("Which email address voicemails should go to")
+        if a["ooh"].startswith("Divert") and len(re.sub(r"\D", "", a["divert"])) < 10:
+            errs.append("The number to divert calls to")
+        if a["msg_type"] == XMAS_MSG[1] and not a["own_msg"] and not a["ooh"].startswith(("Straight", "Divert")):
+            errs.append("The wording for your closed message")
+        for p in changed:
+            if p["mode"] in ("Closing early", "Custom hours") and not p["close"]:
+                errs.append(f"Closing time for {p['date'].strftime('%a %d %b')}")
+            if p["mode"] in ("Opening late", "Custom hours") and not p["open"]:
+                errs.append(f"Opening time for {p['date'].strftime('%a %d %b')}")
+    return a, errs
+
+
+def xmas_rows(a: Dict[str, Any]) -> List[Tuple[str, List[Tuple[str, str]]]]:
+    bh = uk_bank_holidays([p["date"] for p in a["plan"]])
+    hours = [(p["date"].strftime("%a %d %b") + (f" ({day_note(p['date'], bh).split(' · ')[-1]})"
+                                                  if day_note(p["date"], bh) and p["date"].weekday() < 5 else ""),
+              day_text(p["mode"], p["open"], p["close"])) for p in a["changed"]]
+    if hours:
+        hours.append(("Every other day", "As normal"))
+    else:
+        hours = [("Christmas period", "Open as normal throughout")]
+    out = [("Your details", [("Company", a["company"]), ("Name", a["name"]), ("Email", a["email"]),
+                             ("Phone", a["phone"] or "Not given")]),
+           ("Christmas hours", hours)]
+    if a["changed"]:
+        ooh = [("Callers will", a["ooh"])]
+        if "voicemail" in a["ooh"].lower():
+            ooh.append(("Voicemails emailed to", a["vm_email"]))
+        if a["ooh"].startswith("Divert"):
+            ooh.append(("Divert calls to", a["divert"]))
+        if a["message"] and not a["ooh"].startswith(("Straight", "Divert")):
+            ooh += [("Message", a["message"]), ("Recording", a["recording"])]
+        if a["reopen"]:
+            ooh.append(("Back to normal", a["reopen"].strftime("%A %d %B").replace(" 0", " ")))
+        out.append(("While you're closed", ooh))
+    if a["notes"]:
+        out.append(("Anything else", [("Notes", a["notes"])]))
+    return out
+
+
+def xmas_text(a: Dict[str, Any]) -> str:
+    lines = []
+    for title, rows in xmas_rows(a):
+        lines.append(title.upper())
+        lines += [f"{k}: {v}" for k, v in rows]
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _rows_table(sections: List[Tuple[str, List[Tuple[str, str]]]], brand: Dict[str, Any]) -> str:
+    rows = ""
+    for title, items in sections:
+        rows += (f'<tr><td colspan="2" style="padding:14px 0 4px 0;{FONT_CSS};font-size:12px;font-weight:800;'
+                 f'letter-spacing:.06em;color:{brand.get("primary") or PURPLE}">{esc(title.upper())}</td></tr>')
+        for k, v in items:
+            rows += (f'<tr><td valign="top" style="padding:5px 12px 5px 0;border-bottom:1px solid #eeecf6;{FONT_CSS};'
+                     f'font-size:13px;color:#6b7280;width:38%">{esc(k)}</td>'
+                     f'<td valign="top" style="padding:5px 0;border-bottom:1px solid #eeecf6;{FONT_CSS};font-size:13px;'
+                     f'font-weight:600;color:#1f2937">{esc(v)}</td></tr>')
+    return (f'<tr><td style="padding:0 36px 18px 36px"><table role="presentation" width="100%" cellpadding="0" '
+            f'cellspacing="0" border="0" style="background:#faf9fe;border:1px solid #ece9f7;border-radius:10px;'
+            f'padding:4px 16px 12px 16px">{rows}</table></td></tr>')
+
+
+def xmas_customer_email(a: Dict[str, Any], brand: Dict[str, Any]) -> Tuple[str, str]:
+    first = (a.get("name") or "").split(" ")[0]
+    first_day = a["changed"][0]["date"].strftime("%A %d %B").replace(" 0", " ") if a["changed"] else ""
+    inner = (
+        '<tr><td style="padding:28px 0 0 0;font-size:0;line-height:0">&nbsp;</td></tr>'
+        + _p(f"Hi {esc(first) or 'there'},")
+        + _p(f"Thanks for sending your Christmas opening hours for <b>{esc(a.get('company'))}</b>. Here's what we'll set"
+             " up; a PDF copy is attached for your records.")
+        + _rows_table(xmas_rows(a), brand)
+        + (_p(f"We'll have everything in place before <b>{esc(first_day)}</b>, and let you know once it's live.")
+           if first_day else _p("Thanks for letting us know. We'll leave your phones as they are."))
+        + _p("Need to change anything? Just reply to this email.", "font-size:14px;color:#4b5563")
+        + _p(f"Merry Christmas from all of us at {esc(brand.get('name'))}.<br><br>Kind regards,<br>"
+             f"<b style='color:{brand.get('primary') or PURPLE}'>{esc(brand.get('name'))}</b>"
+             + (f"<br>{esc(brand['phone'])}" if brand.get("phone") else "")))
+    return f"Your Christmas opening hours · {brand.get('name')}", _email_shell(inner, brand)
+
+
+def xmas_alert_email(a: Dict[str, Any], brand: Dict[str, Any], aid: str) -> Tuple[str, str]:
+    link = ZOHO.record_url(aid, "Accounts") if aid else ""
+    first_day = a["changed"][0]["date"].strftime("%a %d %b") if a["changed"] else "no changes"
+    inner = (
+        '<tr><td style="padding:24px 0 0 0;font-size:0;line-height:0">&nbsp;</td></tr>'
+        + _p(f"<b>{esc(a.get('company'))}</b> ({esc(brand.get('name'))}) has sent their Christmas hours."
+             f" First change: <b>{esc(first_day)}</b>.")
+        + (_p(f'<a href="{esc(link)}" style="color:{TEAL};font-weight:700">Open the account in Zoho &rarr;</a>') if link else "")
+        + _rows_table(xmas_rows(a), brand))
+    return f"🎄 Christmas hours: {a.get('company')} (first change {first_day})", _email_shell(inner, brand)
+
+
+def process_xmas(a: Dict[str, Any], link: Dict[str, str], brand: Dict[str, Any]) -> Dict[str, Any]:
+    when = now_uk()
+    res: Dict[str, Any] = {"when": when, "errors": [], "emailed": False}
+    res["pdf"] = build_pdf(a, when, xmas_rows(a), "Christmas opening hours", brand)
+    contact_id = ""
+    if ZOHO.configured:
+        try:
+            c = ZOHO.contact(link["cid"]) if link.get("cid") else None
+            if not c:
+                c = ZOHO.find_contact_by_email(a["email"])
+            contact_id = str((c or {}).get("id") or "")
+            sender = sender_address(brand.get("email") or "")
+            if contact_id and sender:
+                try:
+                    att = ZOHO.upload_file(f"{re.sub(r'[^A-Za-z0-9]+', '_', a.get('company') or 'Your')}_Christmas_hours.pdf",
+                                           res["pdf"])
+                    subj, body = xmas_customer_email(a, brand)
+                    ZOHO.send_mail(contact_id, sender, a["email"], a.get("name", ""), subj, body, [att], module="Contacts")
+                    res["emailed"] = True
+                except ZohoError as exc:
+                    res["errors"].append(f"Customer copy: {exc}")
+                alert_to = secret("XMAS_ALERT_TO") or SURVEY_ALERT_TO
+                if alert_to:
+                    try:
+                        subj, body = xmas_alert_email(a, brand, link.get("aid", ""))
+                        ZOHO.send_mail(contact_id, sender, alert_to, "", subj, body, module="Contacts")
+                    except ZohoError as exc:
+                        res["errors"].append(f"Alert email: {exc}")
+            elif not contact_id:
+                res["errors"].append("No matching Zoho contact, so no emails were sent")
+            else:
+                res["errors"].append("No From address in Zoho")
+        except ZohoError as exc:
+            res["errors"].append(f"Zoho: {exc}")
+    else:
+        res["errors"].append("Zoho not configured")
+    key = link.get("aid") or ("e:" + norm(a.get("email"))[:40])
+    record = {
+        "submitted_at": when.isoformat(timespec="seconds"), "account_id": link.get("aid", ""), "contact_id": contact_id,
+        "company": a["company"], "contact": a["name"], "email": a["email"], "phone": a["phone"],
+        "brand": brand.get("name"), "linked": bool(link.get("aid")),
+        "days": [{"date": p["date"].isoformat(), "mode": p["mode"], "open": fmt_t(p["open"]) if p["open"] else "",
+                  "close": fmt_t(p["close"]) if p["close"] else ""} for p in a["changed"]],
+        "first_change": a["changed"][0]["date"].isoformat() if a["changed"] else "",
+        "reopen": a["reopen"].isoformat() if a["reopen"] else "",
+        "summary": "; ".join(f"{p['date'].strftime('%a %d %b')}: {day_text(p['mode'], p['open'], p['close'])}"
+                             for p in a["changed"]) or "Open as normal throughout",
+        "out_of_hours": a["ooh"], "voicemail_to": a["vm_email"] if "voicemail" in a["ooh"].lower() else "",
+        "divert_to": a["divert"] if a["ooh"].startswith("Divert") else "", "message": a["message"],
+        "recording": a["recording"] if a["message"] else "", "notes": a["notes"],
+        "copy_emailed": res["emailed"], "problems": res["errors"],
+    }
+    err = gh_save(key, record, kind="xmas")
+    if err:
+        res["errors"].append(f"Tracker: {err}")
+    return res
+
+
+def xmas_form_page() -> None:
+    components.html(AUTOFILL_JS, height=0)
+    link, brand = read_xmas_link()
+    brand_css(brand)
+    ss = st.session_state
+    days = xmas_season()
+    bh = uk_bank_holidays(days)
+    if "x_started" not in ss:
+        ss["x_started"] = time.time()
+        for k, f in (("company", "c"), ("name", "n"), ("email", "e"), ("phone", "p")):
+            if link.get(f):
+                ss[f"x_{k}"] = link[f]
+        if link.get("e"):
+            ss["x_vm_email"] = link["e"]
+    first = (ss.get("x_name") or "").split(" ")[0]
+    yr = days[0].year if days else now_uk().year
+    html('<div class="qs-hero xmas">' + brand_html(brand)
+         + f'<div class="qs-title">{("Hi " + esc(first) + ", how") if first else "How"} will you be '
+           f'<span>open</span> this Christmas?</div>'
+         + '<div class="qs-sub">Tell us your opening hours over the festive period and what callers should hear while'
+           " you're closed. We'll set it all up on your phone system before you break up, so there's nothing for you to"
+           " do on the day.</div>"
+         + f'<div class="qs-meta"><div>🎄 Christmas {yr}</div><div>⏱ About 2 minutes</div>'
+           '<div>📄 Copy emailed to you</div></div></div>')
+
+    with section("x1", 1, "About you", "So we know whose phones these are", bool(ss.get("x_company") and ss.get("x_email"))):
+        c1, c2 = st.columns(2)
+        c1.text_input("Company name", key="x_company", autocomplete="organization")
+        c2.text_input("Your name", key="x_name", autocomplete="name")
+        c3, c4 = st.columns(2)
+        c3.text_input("Email address", key="x_email", autocomplete="email")
+        c4.text_input("Phone number", key="x_phone", autocomplete="tel")
+
+    changed_now = [d for d in days if (ss.get(f"x_mode_{d.isoformat()}") or "As normal") != "As normal"]
+    with section("x2", 2, "Your Christmas hours", "Start with a quick choice, then adjust any day", bool(changed_now)):
+        try:
+            st.pills("Quick start", list(XMAS_PRESETS), selection_mode="single", key="x_preset", on_change=apply_preset)
+        except AttributeError:
+            st.radio("Quick start", list(XMAS_PRESETS), key="x_preset", index=None, horizontal=True, on_change=apply_preset)
+        html('<div style="font-size:.8rem;color:var(--muted);margin:-4px 0 6px 0">"As normal" means your phones work'
+             " exactly as they do on any normal day (weekends stay as they are).</div>")
+        for d in days:
+            iso = d.isoformat()
+            note = day_note(d, bh)
+            r1, r2, r3, r4 = st.columns([1.35, 1.5, 0.95, 0.95])
+            r1.markdown(f'<div style="padding-top:8px;line-height:1.2"><b style="color:var(--purple)">'
+                        f'{d.strftime("%a %d %b")}</b><br><span style="font-size:.74rem;color:var(--muted)">'
+                        f'{esc(note) or "&nbsp;"}</span></div>', unsafe_allow_html=True)
+            mode = r2.selectbox(f"{d.strftime('%a %d %b')} hours", XMAS_MODES, key=f"x_mode_{iso}",
+                                label_visibility="collapsed")
+            if mode in ("Opening late", "Custom hours"):
+                r3.time_input("Open at", value=dt_time(10, 0) if mode == "Opening late" else dt_time(9, 0),
+                              key=f"x_open_{iso}", step=900)
+            if mode in ("Closing early", "Custom hours"):
+                (r4 if mode == "Custom hours" else r3).time_input("Close at", value=dt_time(13, 0), key=f"x_close_{iso}",
+                                                                  step=900)
+        st.caption("Different days or more than one site? Tell us in the last box.")
+
+    if changed_now:
+        ooh = ss.get("x_ooh") or ""
+        with section("x3", 3, "While you're closed", "What happens when someone calls", bool(ooh)):
+            try:
+                st.pills("Callers should", XMAS_OOH, selection_mode="single", key="x_ooh")
+            except AttributeError:
+                st.radio("Callers should", XMAS_OOH, key="x_ooh", index=None)
+            ooh = ss.get("x_ooh") or ""
+            if "voicemail" in ooh.lower():
+                st.text_input("Email voicemails to", key="x_vm_email", placeholder="Where should messages go?")
+            if ooh.startswith("Divert"):
+                st.text_input("Divert calls to", key="x_divert", placeholder="e.g. 07700 900123")
+            if ooh and not ooh.startswith(("Straight", "Divert")):
+                try:
+                    st.pills("Closed message", XMAS_MSG, selection_mode="single", key="x_msg", default=XMAS_MSG[0])
+                except (AttributeError, TypeError):
+                    st.radio("Closed message", XMAS_MSG, key="x_msg", horizontal=True)
+                if (ss.get("x_msg") or XMAS_MSG[0]) == XMAS_MSG[0]:
+                    plan = [{"date": d, "mode": ss.get(f"x_mode_{d.isoformat()}") or "As normal"} for d in days]
+                    html('<div style="background:#faf9fe;border:1px solid #e7e4f3;border-left:4px solid var(--teal);'
+                         'border-radius:10px;padding:12px 14px;font-size:.9rem;color:#374151;line-height:1.55;'
+                         f'margin:-2px 0 10px 0">“{esc(xmas_message(ss.get("x_company", ""), ooh, reopen_day(plan)))}”</div>')
+                else:
+                    st.text_area("Your message", key="x_own_msg", height=100,
+                                 placeholder="What callers should hear while you're closed")
+                try:
+                    st.pills("Recording", XMAS_REC, selection_mode="single", key="x_rec", default=XMAS_REC[0],
+                             help="We can create it with a natural-sounding voice, or you can record it yourself.")
+                except (AttributeError, TypeError):
+                    st.radio("Recording", XMAS_REC, key="x_rec", horizontal=True)
+
+    with section("x4", 4 if changed_now else 3, "Anything else?", "Optional", bool(ss.get("x_notes"))):
+        st.text_area("Anything else we should know?", key="x_notes", height=90,
+                     placeholder="e.g. a second site with different hours, or someone on call")
+
+    with st.container(key="hp"):
+        st.text_input("Leave this empty", key="x_website", autocomplete="off")
+    if ss.get("x_errors"):
+        st.error("Nearly there. Please check:\n\n" + "\n".join(f"- {e}" for e in ss["x_errors"]))
+    if st.button("Send our Christmas hours  →", key="submit", type="primary", **FULL):
+        a, errs = xmas_collect(days)
+        ss["x_errors"] = errs
+        if errs:
+            st.rerun()
+        if ss.get("x_website") or time.time() - ss.get("x_started", 0) < 5:
+            ss["xm_result"] = {"answers": a, "brand": brand, "pdf": b"", "emailed": False, "errors": []}
+            st.rerun()
+        with st.spinner("Sending your Christmas hours…"):
+            res = process_xmas(a, link, brand)
+        res.update(answers=a, brand=brand)
+        ss["xm_result"] = res
+        st.rerun()
+    html('<div class="qs-fine">You\'ll get a copy by email straight away.</div>')
+    footer(brand, "We only use these details to set up your phone system.")
+
+
+def xmas_thanks_page() -> None:
+    res = st.session_state["xm_result"]
+    a, brand = res["answers"], res["brand"]
+    brand_css(brand)
+    first = (a.get("name") or "").split(" ")[0]
+    html('<div class="qs-hero xmas">' + brand_html(brand)
+         + f'<div class="qs-title">Thank you{", " + esc(first) if first else ""}. <span>You\'re all set.</span></div>'
+         + '<div class="qs-sub">Your Christmas hours are with our team. Here\'s a summary for your records.</div></div>')
+    first_day = a["changed"][0]["date"].strftime("%A %d %B").replace(" 0", " ") if a["changed"] else ""
+    copy_line = (f"A copy is on its way to <b>{esc(a.get('email'))}</b>, with a PDF attached."
+                 if res.get("emailed") else "Download a copy below for your records.")
+    when_line = (f" We'll have everything set up before <b>{esc(first_day)}</b> and confirm once it's live."
+                 if first_day else " We'll leave your phones as they are.")
+    html(f'<div class="qs-done"><div class="qs-tick">{TICK_SVG}</div><h3>We\'ve got your Christmas hours</h3>'
+         f'<p>{copy_line}{when_line}</p></div>')
+    cards = ""
+    for title, rows in xmas_rows(a):
+        cards += (f'<div class="qs-sum"><div class="h">{esc(title)}</div>'
+                  + "".join(f'<div class="r"><span class="k">{esc(k)}</span><span class="v">{esc(v)}</span></div>'
+                            for k, v in rows) + "</div>")
+    html(f'<div class="qs-grid">{cards}</div>')
+    if res.get("pdf"):
+        st.download_button("Download our Christmas hours (PDF)  ↓", res["pdf"], key="dl", type="primary", **FULL,
+                           file_name=f"{re.sub(r'[^A-Za-z0-9]+', '_', a.get('company') or 'Your')}_Christmas_hours.pdf",
+                           mime="application/pdf")
+    phone = brand.get("phone")
+    html('<div class="qs-steps" style="margin-top:16px"><div class="t">What happens next</div>'
+         + "".join(f'<div class="qs-step"><i>{i}</i><div>{t}</div></div>' for i, t in enumerate([
+             "Our engineers set up your Christmas hours and message on your phone system.",
+             "We email you to confirm once it's in place.",
+             "Need a change? Just reply to our email" + (f" or call {esc(phone)}" if phone else "") + "."], start=1))
+         + "</div>")
+    footer(brand, "Merry Christmas and a happy New Year.")
 
 
 # =====================================================================
 html(CSS)
 if st.query_params.get("admin"):
     admin_page()
+elif st.query_params.get("form") == "xmas":
+    if st.session_state.get("xm_result"):
+        xmas_thanks_page()
+    else:
+        xmas_form_page()
 elif st.session_state.get("qs_result"):
     thanks_page()
 else:
