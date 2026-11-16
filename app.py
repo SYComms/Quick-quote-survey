@@ -63,7 +63,8 @@ SURVEY_SOURCE = secret("SURVEY_LEAD_SOURCE", "Survey form")
 BOOKING_URL = secret("DEMO_BOOKING_URL")
 SIGNING_KEY = secret("SURVEY_SIGNING_KEY")
 ZOHO_SCOPE = ("ZohoCRM.modules.leads.ALL,ZohoCRM.modules.contacts.READ,ZohoCRM.send_mail.contacts.CREATE,ZohoCRM.modules.notes.CREATE,ZohoCRM.coql.READ,ZohoCRM.settings.fields.READ,"
-              "ZohoCRM.send_mail.leads.CREATE,ZohoCRM.Files.CREATE,ZohoCRM.settings.emails.READ")
+              "ZohoCRM.send_mail.leads.CREATE,ZohoCRM.Files.CREATE,ZohoCRM.settings.emails.READ,"
+              "Desk.tickets.ALL,Desk.contacts.READ,Desk.contacts.CREATE,Desk.basic.READ,Desk.settings.READ")
 DEFAULT_BRAND = {"name": COMPANY, "primary": PURPLE, "accent": TEAL,
                  "tagline": "Business phones that work with your software", **CONTACT}
 APP_NAMES = {"pe": "Prospect Engine", "lr": "Lead Revival", "mp": "MY PA", "cg": "Customer Growth"}
@@ -629,15 +630,20 @@ def customer_email(a: Dict[str, Any]) -> Tuple[str, str]:
     return f"Your phone system answers · {COMPANY}", _email_shell(inner)
 
 
-def alert_email(a: Dict[str, Any], lead_id: str, how: str, src: str) -> Tuple[str, str]:
+def alert_email(a: Dict[str, Any], lead_id: str, how: str, src: str,
+                tk: Optional[Dict[str, str]] = None) -> Tuple[str, str]:
     link = ZOHO.record_url(lead_id) if lead_id else ""
     inner = (
         '<tr><td style="padding:24px 0 0 0;font-size:0;line-height:0">&nbsp;</td></tr>'
         + _p(f"<b>{esc(a.get('company'))}</b> has just completed the quote survey"
              + (f" (from {esc(APP_NAMES.get(src, src))})" if src else "") + f". Zoho lead: {esc(how)}.")
+        + (_p(f'Tech Support ticket <b>#{esc(tk.get("number"))}</b> created'
+              + (f' · <a href="{esc(tk["url"])}" style="color:{TEAL};font-weight:700">open it in Zoho Desk &rarr;</a>'
+                 if tk.get("url") else "")) if tk and tk.get("id") else "")
         + (_p(f'<a href="{esc(link)}" style="color:{TEAL};font-weight:700">Open the lead in Zoho &rarr;</a>') if link else "")
         + _summary_table(a))
-    return f"📋 Survey completed: {a.get('company')}", _email_shell(inner)
+    return (f"📋 Survey completed: {a.get('company')}" + (f" · ticket #{tk['number']}" if tk and tk.get("number") else ""),
+            _email_shell(inner))
 
 
 # =====================================================================
@@ -691,7 +697,15 @@ def process_submission(a: Dict[str, Any], link: Dict[str, str]) -> Dict[str, Any
                 ZOHO.add_tag(lead_id, SURVEY_TAG_DONE)
             except ZohoError as exc:
                 res["errors"].append(f"Tag: {exc}")
-            # 3. Emails: the customer's copy (with PDF), then the alert
+            # 3. Tech Support ticket with the system information (not fatal)
+            tk: Dict[str, str] = {}
+            if secret("SURVEY_DESK_TICKETS", "on").lower() not in ("off", "no", "false", "0"):
+                try:
+                    tk = survey_ticket(a, lead_id, how, link.get("src", ""), res["pdf"])
+                except ZohoError as exc:
+                    res["errors"].append(f"Tech Support ticket: {exc}")
+            res["ticket"] = tk
+            # 4. Emails: the customer's copy (with PDF), then the alert
             sender = sender_address()
             if sender:
                 try:
@@ -704,7 +718,7 @@ def process_submission(a: Dict[str, Any], link: Dict[str, str]) -> Dict[str, Any
                     res["errors"].append(f"Customer email: {exc}")
                 if SURVEY_ALERT_TO:
                     try:
-                        subj, body = alert_email(a, lead_id, how, link.get("src", ""))
+                        subj, body = alert_email(a, lead_id, how, link.get("src", ""), tk)
                         ZOHO.send_mail(lead_id, sender, SURVEY_ALERT_TO, "", subj, body)
                     except ZohoError as exc:
                         res["errors"].append(f"Alert email: {exc}")
@@ -719,7 +733,9 @@ def process_submission(a: Dict[str, Any], link: Dict[str, str]) -> Dict[str, Any
     record = {"submitted_at": when.isoformat(timespec="seconds"), "lead_id": lead_id, "link_lead_id": link.get("lid", ""),
               "src": link.get("src", ""), "app": APP_NAMES.get(link.get("src", ""), ""), "zoho": res["how"],
               "company": a.get("company"), "contact": a.get("name"), "email": a.get("email"), "phone": a.get("phone"),
-              "copy_emailed": res["emailed"], "answers": a, "problems": res["errors"]}
+              "copy_emailed": res["emailed"], "answers": a, "problems": res["errors"],
+              "ticket_id": (res.get("ticket") or {}).get("id", ""), "ticket_number": (res.get("ticket") or {}).get("number", ""),
+              "ticket_url": (res.get("ticket") or {}).get("url", "")}
     err = gh_save(key, record)
     if err:
         res["errors"].append(f"Stats: {err}")
@@ -1178,6 +1194,12 @@ def admin_page() -> None:
             except ZohoError:
                 checks.append(("Christmas form (Contacts)", False,
                                "The Zoho key needs the new scope: make a fresh one with the key helper below"))
+        if ZOHO.configured:
+            try:
+                dep = desk_department_id()
+                checks.append(("Tech Support tickets", True, f"New replies become tickets in '{DESK_DEPARTMENT}' ({dep})"))
+            except ZohoError as exc:
+                checks.append(("Tech Support tickets", False, str(exc)))
         try:
             xd, _ = gh_read("xmas")
             checks.append(("Christmas tracker", bool(gh_settings("xmas")[0] and gh_settings("xmas")[1]),
@@ -1492,16 +1514,182 @@ def xmas_customer_email(a: Dict[str, Any], brand: Dict[str, Any]) -> Tuple[str, 
     return f"Your Christmas opening hours · {brand.get('name')}", _email_shell(inner, brand)
 
 
-def xmas_alert_email(a: Dict[str, Any], brand: Dict[str, Any], aid: str) -> Tuple[str, str]:
+def xmas_alert_email(a: Dict[str, Any], brand: Dict[str, Any], aid: str,
+                     tk: Optional[Dict[str, str]] = None) -> Tuple[str, str]:
     link = ZOHO.record_url(aid, "Accounts") if aid else ""
     first_day = a["changed"][0]["date"].strftime("%a %d %b") if a["changed"] else "no changes"
     inner = (
         '<tr><td style="padding:24px 0 0 0;font-size:0;line-height:0">&nbsp;</td></tr>'
         + _p(f"<b>{esc(a.get('company'))}</b> ({esc(brand.get('name'))}) has sent their Christmas hours."
              f" First change: <b>{esc(first_day)}</b>.")
+        + (_p(f'Tech Support ticket <b>#{esc(tk.get("number"))}</b>'
+              + (" updated with the new answers" if tk.get("updated") else " created")
+              + (f' · <a href="{esc(tk["url"])}" style="color:{TEAL};font-weight:700">open it in Zoho Desk &rarr;</a>'
+                 if tk.get("url") else "")) if tk and tk.get("id") else "")
         + (_p(f'<a href="{esc(link)}" style="color:{TEAL};font-weight:700">Open the account in Zoho &rarr;</a>') if link else "")
         + _rows_table(xmas_rows(a), brand))
-    return f"🎄 Christmas hours: {a.get('company')} (first change {first_day})", _email_shell(inner, brand)
+    return (f"🎄 Christmas hours: {a.get('company')} (first change {first_day})"
+            + (f" · ticket #{tk['number']}" if tk and tk.get("number") else ""), _email_shell(inner, brand))
+
+
+# ---------- Zoho Desk: a ticket in "SYC - Tech Support" for every Christmas hours reply ----------
+DESK_API = secret("DESK_API_DOMAIN", "https://desk.zoho.eu").rstrip("/")
+DESK_DEPARTMENT = secret("XMAS_DESK_DEPARTMENT", "SYC - Tech Support")
+
+
+def desk_request(method: str, path: str, org: bool = True, **kw) -> Optional[Dict[str, Any]]:
+    headers = {"Authorization": f"Zoho-oauthtoken {ZOHO._token()}"}
+    if org:
+        headers["orgId"] = desk_org_id()
+    try:
+        r = requests.request(method, f"{DESK_API}/api/v1{path}", headers=headers, timeout=25, **kw)
+    except requests.exceptions.RequestException as exc:
+        raise ZohoError(f"Couldn't reach Zoho Desk ({exc.__class__.__name__}).")
+    if r.status_code == 204:
+        return None
+    try:
+        body = r.json()
+    except ValueError:
+        body = {}
+    if r.status_code >= 400:
+        msg = body.get("message") or body.get("errorCode") or f"HTTP {r.status_code}"
+        if "scope" in str(msg).lower() or body.get("errorCode") in ("SCOPE_MISMATCH", "INVALID_OAUTH"):
+            msg = "the Zoho key doesn't include Zoho Desk yet: make a fresh one with the key helper on the admin page"
+        raise ZohoError(f"Zoho Desk: {msg}")
+    return body
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def desk_org_id() -> str:
+    if secret("DESK_ORG_ID"):
+        return secret("DESK_ORG_ID")
+    body = desk_request("GET", "/organizations", org=False) or {}
+    orgs = body.get("data") or []
+    if not orgs:
+        raise ZohoError("Zoho Desk: no organisation found for this login")
+    return str(orgs[0]["id"])
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def desk_departments() -> List[Dict[str, Any]]:
+    body = desk_request("GET", "/departments", params={"limit": 100}) or {}
+    return [{"id": str(d.get("id")), "name": d.get("name") or ""} for d in body.get("data") or []]
+
+
+def desk_department_id(name: str = "", fixed_id: str = "") -> str:
+    name = name or DESK_DEPARTMENT
+    fixed_id = fixed_id or (secret("XMAS_DESK_DEPARTMENT_ID") if name == DESK_DEPARTMENT else "")
+    if fixed_id:
+        return fixed_id
+    deps = desk_departments()
+    d = next((d for d in deps if norm(d["name"]) == norm(name)), None) or \
+        next((d for d in deps if norm(name) in norm(d["name"])), None)
+    if not d:
+        raise ZohoError(f"Zoho Desk: no department called '{name}' (found: "
+                        + ", ".join(x["name"] for x in deps) + ")")
+    return d["id"]
+
+
+def xmas_ticket_html(a: Dict[str, Any], brand: Dict[str, Any], link: Dict[str, str]) -> str:
+    parts = [f"<p><b>{esc(a['company'])}</b> ({esc(brand.get('name'))}) sent their Christmas opening hours via the"
+             " online form. Please set these up on their phone system and confirm with the customer.</p>"]
+    for title, rows in xmas_rows(a):
+        parts.append(f"<p><b>{esc(title.upper())}</b><br>" + "<br>".join(f"{esc(k)}: <b>{esc(v)}</b>" for k, v in rows)
+                     + "</p>")
+    if link.get("aid"):
+        parts.append(f'<p><a href="{esc(ZOHO.record_url(link["aid"], "Accounts"))}">Open the account in Zoho CRM</a></p>')
+    return "".join(parts)
+
+
+def xmas_ticket(a: Dict[str, Any], brand: Dict[str, Any], link: Dict[str, str], pdf: bytes,
+                previous: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Creates the Tech Support ticket (or, when the customer re-submits, adds their new answers to the same ticket).
+    Returns {'id', 'number', 'url'}."""
+    first = a["changed"][0]["date"] if a["changed"] else None
+    if previous and previous.get("ticket_id"):
+        desk_request("POST", f"/tickets/{previous['ticket_id']}/comments",
+                     json={"isPublic": False, "contentType": "html",
+                           "content": "<p><b>Updated Christmas hours from the customer</b> (these replace the earlier"
+                                      " ones):</p>" + xmas_ticket_html(a, brand, link)})
+        return {"id": previous["ticket_id"], "number": previous.get("ticket_number", ""),
+                "url": previous.get("ticket_url", ""), "updated": "yes"}
+    names = (a.get("name") or "").split()
+    ticket: Dict[str, Any] = {
+        "subject": f"🎄 Christmas hours: {a['company']}" + (f" (first change {first.strftime('%a %d %b')})" if first
+                                                          else " (no changes)"),
+        "departmentId": desk_department_id(),
+        "contact": {"lastName": names[-1] if names else a["company"], "firstName": " ".join(names[:-1]),
+                    "email": a["email"], **({"phone": a["phone"]} if a.get("phone") else {})},
+        "description": xmas_ticket_html(a, brand, link),
+        "channel": "Web", "priority": "High" if first else "Low", "classification": "Request",
+    }
+    if a.get("phone"):
+        ticket["phone"] = a["phone"]
+    if first:  # Due the working day before their first change, 9am
+        due = first - timedelta(days=1)
+        while due.weekday() >= 5:
+            due -= timedelta(days=1)
+        ticket["dueDate"] = f"{due.isoformat()}T09:00:00.000Z"
+    try:
+        body = desk_request("POST", "/tickets", json=ticket) or {}
+    except ZohoError as exc:
+        if "classification" not in str(exc).lower() and "priority" not in str(exc).lower():
+            raise
+        ticket.pop("classification", None)  # Some layouts don't use these: try once more without them
+        ticket.pop("priority", None)
+        body = desk_request("POST", "/tickets", json=ticket) or {}
+    tid = str(body.get("id") or "")
+    if tid and pdf:
+        try:
+            desk_request("POST", f"/tickets/{tid}/attachments", params={"isPublic": "false"},
+                         files={"file": (f"{re.sub(r'[^A-Za-z0-9]+', '_', a['company'] or 'Customer')}_Christmas_hours.pdf",
+                                         pdf, "application/pdf")})
+        except ZohoError:
+            pass  # The details are in the ticket anyway
+    return {"id": tid, "number": str(body.get("ticketNumber") or ""), "url": body.get("webUrl") or ""}
+
+
+SURVEY_DESK_DEPARTMENT = secret("SURVEY_DESK_DEPARTMENT", "SYC - Tech Support")
+
+
+def survey_ticket(a: Dict[str, Any], lead_id: str, how: str, src: str, pdf: bytes) -> Dict[str, str]:
+    """A Tech Support ticket for a completed quote survey (system information for the quote)."""
+    parts = [f"<p><b>{esc(a.get('company'))}</b> completed the 2-minute quote survey"
+             + (f" (link from {esc(APP_NAMES.get(src, src))})" if src else "")
+             + f". Zoho lead: {esc(how)}. Please review the system information below for the quote.</p>"]
+    for title, rows in answer_rows(a):
+        parts.append(f"<p><b>{esc(title.upper())}</b><br>"
+                     + "<br>".join(f"{esc(k)}: <b>{esc(v)}</b>" for k, v in rows) + "</p>")
+    if lead_id:
+        parts.append(f'<p><a href="{esc(ZOHO.record_url(lead_id))}">Open the lead in Zoho CRM</a></p>')
+    names = (a.get("name") or "").split()
+    ticket: Dict[str, Any] = {
+        "subject": f"📋 Quote survey: {a.get('company')} ({a.get('users') or '?'} users)",
+        "departmentId": desk_department_id(SURVEY_DESK_DEPARTMENT, secret("SURVEY_DESK_DEPARTMENT_ID")),
+        "contact": {"lastName": names[-1] if names else (a.get("company") or "Customer"),
+                    "firstName": " ".join(names[:-1]), "email": a["email"],
+                    **({"phone": a["phone"]} if a.get("phone") else {})},
+        "description": "".join(parts), "channel": "Web", "priority": "Medium", "classification": "Request",
+    }
+    if a.get("phone"):
+        ticket["phone"] = a["phone"]
+    try:
+        body = desk_request("POST", "/tickets", json=ticket) or {}
+    except ZohoError as exc:
+        if "classification" not in str(exc).lower() and "priority" not in str(exc).lower():
+            raise
+        ticket.pop("classification", None)
+        ticket.pop("priority", None)
+        body = desk_request("POST", "/tickets", json=ticket) or {}
+    tid = str(body.get("id") or "")
+    if tid and pdf:
+        try:
+            desk_request("POST", f"/tickets/{tid}/attachments", params={"isPublic": "false"},
+                         files={"file": (f"{re.sub(r'[^A-Za-z0-9]+', '_', a.get('company') or 'Customer')}_survey.pdf",
+                                         pdf, "application/pdf")})
+        except ZohoError:
+            pass
+    return {"id": tid, "number": str(body.get("ticketNumber") or ""), "url": body.get("webUrl") or ""}
 
 
 def process_xmas(a: Dict[str, Any], link: Dict[str, str], brand: Dict[str, Any]) -> Dict[str, Any]:
@@ -1509,6 +1697,18 @@ def process_xmas(a: Dict[str, Any], link: Dict[str, str], brand: Dict[str, Any])
     res: Dict[str, Any] = {"when": when, "errors": [], "emailed": False}
     res["pdf"] = build_pdf(a, when, xmas_rows(a), "Christmas opening hours", brand)
     contact_id = ""
+    key = link.get("aid") or ("e:" + norm(a.get("email"))[:40])
+    tk: Dict[str, str] = {}
+    if ZOHO.configured and secret("XMAS_DESK_TICKETS", "on").lower() not in ("off", "no", "false", "0"):
+        try:
+            previous = gh_read("xmas")[0].get(key)
+        except Exception:
+            previous = None
+        try:
+            tk = xmas_ticket(a, brand, link, res["pdf"], previous)
+        except ZohoError as exc:
+            res["errors"].append(f"Tech Support ticket: {exc}")
+    res["ticket"] = tk
     if ZOHO.configured:
         try:
             c = ZOHO.contact(link["cid"]) if link.get("cid") else None
@@ -1528,7 +1728,7 @@ def process_xmas(a: Dict[str, Any], link: Dict[str, str], brand: Dict[str, Any])
                 alert_to = secret("XMAS_ALERT_TO") or SURVEY_ALERT_TO
                 if alert_to:
                     try:
-                        subj, body = xmas_alert_email(a, brand, link.get("aid", ""))
+                        subj, body = xmas_alert_email(a, brand, link.get("aid", ""), tk)
                         ZOHO.send_mail(contact_id, sender, alert_to, "", subj, body, module="Contacts")
                     except ZohoError as exc:
                         res["errors"].append(f"Alert email: {exc}")
@@ -1540,7 +1740,6 @@ def process_xmas(a: Dict[str, Any], link: Dict[str, str], brand: Dict[str, Any])
             res["errors"].append(f"Zoho: {exc}")
     else:
         res["errors"].append("Zoho not configured")
-    key = link.get("aid") or ("e:" + norm(a.get("email"))[:40])
     record = {
         "submitted_at": when.isoformat(timespec="seconds"), "account_id": link.get("aid", ""), "contact_id": contact_id,
         "company": a["company"], "contact": a["name"], "email": a["email"], "phone": a["phone"],
@@ -1555,6 +1754,7 @@ def process_xmas(a: Dict[str, Any], link: Dict[str, str], brand: Dict[str, Any])
         "divert_to": a["divert"] if a["ooh"].startswith("Divert") else "", "message": a["message"],
         "recording": a["recording"] if a["message"] else "", "notes": a["notes"],
         "copy_emailed": res["emailed"], "problems": res["errors"],
+        "ticket_id": tk.get("id", ""), "ticket_number": tk.get("number", ""), "ticket_url": tk.get("url", ""),
     }
     err = gh_save(key, record, kind="xmas")
     if err:
