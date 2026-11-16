@@ -801,8 +801,11 @@ input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus
 [data-testid="stButtonGroup"] button[aria-pressed="true"]{{background:var(--teal)!important;border-color:var(--teal)!important;
   color:#fff!important;font-weight:600!important}}
 [data-testid="stButtonGroup"] button[kind*="Active"]:hover,[data-testid*="pillsActive"]:hover{{filter:brightness(1.05)}}
-[data-testid="stAlert"]{{background:#fff4f2!important;border:1px solid #f6c9c0!important;border-radius:12px!important}}
-[data-testid="stAlert"] *{{color:#7a2617!important}}
+[data-testid="stAlert"],[data-testid="stAlertContainer"],[data-testid="stAlert"] [role="alert"]{{background:#fff8ec!important;
+  border-radius:12px!important}}
+[data-testid="stAlert"]{{border:1px solid #f5c26b!important;box-shadow:0 6px 18px -12px rgba(180,83,9,.45)}}
+[data-testid="stAlert"] *{{color:#7c3a06!important;-webkit-text-fill-color:#7c3a06!important;background:transparent!important}}
+[data-testid="stAlert"] li::marker{{color:#d97706!important}}
 .stApp button[kind="secondary"]:not([data-testid*="pills"]){{background:#fff!important;color:var(--purple)!important;
   border:1px solid #dcd8ec!important}}
 .stApp [data-testid="stCode"] pre,.stApp pre{{background:#f6f5fb!important}}
@@ -1004,7 +1007,7 @@ def form_page() -> None:
     g = lambda k: ss.get(f"f_{k}")  # noqa: E731
     done1 = all(str(g(k) or "").strip() for k in ("company", "name", "email", "phone"))
     done2 = all(str(g(k) or "").strip() for k in ("street", "town", "postcode"))
-    done3 = bool(g("users")) and bool(g("call_pref"))
+    done3 = bool(g("users"))
     done4 = bool(g("numbers"))
     done5 = bool(g("system") or g("system_age"))
     n_done = sum([done1, done2, done3, done4, done5])
@@ -1032,7 +1035,8 @@ def form_page() -> None:
     with section("3", 3, "Your team", "Who makes and takes calls, and how", done3):
         st.number_input("How many people need to make or take calls?", min_value=1, max_value=5000, step=1,
                         key="f_users", value=None, placeholder="e.g. 8")
-        pills("How would your team like to take calls? Pick any that apply", CALL_OPTIONS, "f_call_pref", multi=True)
+        pills("How would your team like to take calls? Pick any that apply (optional)", CALL_OPTIONS, "f_call_pref",
+              multi=True)
         if "Desk phones" in (g("call_pref") or []):
             st.number_input("How many desk handsets do you need?", min_value=1, max_value=5000, step=1,
                             key="f_handsets", value=None, placeholder="e.g. 6")
@@ -1053,7 +1057,7 @@ def form_page() -> None:
         st.text_input("Leave this empty", key="f_website", autocomplete="off")
 
     if ss.get("qs_errors"):
-        st.error("Nearly there. Please check:\n\n" + "\n".join(f"- {e}" for e in ss["qs_errors"]))
+        st.error("**Nearly there.** Please check:\n\n" + "\n".join(f"- {e}" for e in ss["qs_errors"]))
     if st.button("Send my answers  →", key="submit", type="primary", **FULL):
         submit(link)
     html('<div class="qs-fine">You\'ll get a copy of your answers by email straight away.</div>')
@@ -1088,8 +1092,6 @@ def collect() -> Tuple[Dict[str, Any], List[str]]:
         errs.append("The postcode doesn't look like a UK postcode")
     if not a["users"]:
         errs.append("How many people need to make or take calls")
-    if not a["call_pref"]:
-        errs.append("How your team would like to take calls")
     if not a["numbers"]:
         errs.append("What you'd like to do with your phone numbers")
     return a, errs
@@ -1858,7 +1860,7 @@ def xmas_form_page() -> None:
     with st.container(key="hp"):
         st.text_input("Leave this empty", key="x_website", autocomplete="off")
     if ss.get("x_errors"):
-        st.error("Nearly there. Please check:\n\n" + "\n".join(f"- {e}" for e in ss["x_errors"]))
+        st.error("**Nearly there.** Please check:\n\n" + "\n".join(f"- {e}" for e in ss["x_errors"]))
     if st.button("Send our Christmas hours  →", key="submit", type="primary", **FULL):
         a, errs = xmas_collect(days)
         ss["x_errors"] = errs
